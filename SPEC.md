@@ -289,6 +289,25 @@ External dependencies are intentionally narrow:
   global-flags table in the README — it would be a partial, drift-prone
   mirror of the command tree, contradicting the generated-skill SSOT.
 
+## Fork workflow
+
+For `trodemaster/slk`, the maintainer has authorized landing validated work on
+`main` without a pull-request or external-review gate. Routine changes may be
+committed and pushed directly to `origin/main`. If a feature branch or pull
+request already exists, merge it into this fork's `main` once validation passes;
+do not leave completed work waiting for a review unless explicitly requested.
+This repository-specific policy overrides generic feature-branch requirements.
+
+Preserve unrelated local work, validate changes before landing them, and push
+every new commit to `origin` immediately. Never push to `upstream` or open an
+upstream pull request unless the maintainer explicitly requests it. Repository
+visibility is a separate setting; do not change it as part of this workflow.
+
+Release timing remains the maintainer's decision. Version bumps stay separate
+from feature, fix, or documentation changes and follow the release fan-out in
+Deploy. After landing changes, ask whether to release and recommend a version
+based on all work since the last release.
+
 ## Verification
 
 - Build: `go build -o slk ./cmd/slk` (version is read from the embedded `VERSION` file)
