@@ -84,6 +84,8 @@ slk search messages [flags]
 | `--public` | — | — | restrict the search to public channels (appends in:public to the query) |
 | `--query` | ✓ | — | search query |
 
+**Tips:** Search messages, preserving file and image references when Slack includes them. View accessible URLs directly or use file download for protected Slack files. Search does not download images or fetch additional file metadata.
+
 ## slk search users
 
 List/search workspace users (client-side filter)

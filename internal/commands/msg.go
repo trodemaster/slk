@@ -13,14 +13,16 @@ import (
 
 // msgItem is one trimmed message.
 type msgItem struct {
-	User   string `json:"user"`
-	Text   string `json:"text"`
-	TS     string `json:"ts"`
-	Thread string `json:"thread,omitempty"`
+	User   string      `json:"user"`
+	Text   string      `json:"text"`
+	TS     string      `json:"ts"`
+	Thread string      `json:"thread,omitempty"`
+	Files  []fileItem  `json:"files,omitempty"`
+	Images []imageItem `json:"images,omitempty"`
 }
 
 func (m msgItem) Concise() string {
-	return fmt.Sprintf("%s: %s [%s]", m.User, m.Text, shortTS(m.TS))
+	return appendMediaSummary(fmt.Sprintf("%s: %s [%s]", m.User, m.Text, shortTS(m.TS)), m.Files, m.Images)
 }
 
 // slackMessage is the subset of fields slk renders from
@@ -33,9 +35,12 @@ type slackMessage struct {
 	BotProfile struct {
 		Name string `json:"name"`
 	} `json:"bot_profile"`
-	Text     string `json:"text"`
-	TS       string `json:"ts"`
-	ThreadTS string `json:"thread_ts"`
+	Text        string            `json:"text"`
+	TS          string            `json:"ts"`
+	ThreadTS    string            `json:"thread_ts"`
+	Files       []slackFile       `json:"files"`
+	Blocks      []slackImageBlock `json:"blocks"`
+	Attachments []slackAttachment `json:"attachments"`
 }
 
 // messageDisplay picks the best human-visible name for a message.
@@ -91,6 +96,10 @@ func newMsgReadCommand(g *GlobalFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "read",
 		Short: "Read messages from a channel or DM",
+		Long: "Read messages and their file/image references without downloading anything. " +
+			"Accessible image URLs can be viewed directly. For protected Slack files, " +
+			"use file download --file <ID> to save bytes in a private temporary directory " +
+			"and give the returned path to the agent's image viewer.",
 		Annotations: map[string]string{
 			"slackMethod": "conversations.history",
 			"userScopes":  "channels:history,groups:history,im:history,mpim:history",
@@ -123,23 +132,12 @@ func newMsgReadCommand(g *GlobalFlags) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), string(raw))
 				return nil
 			}
-			var resp struct {
-				Messages []slackMessage `json:"messages"`
-			}
-			if err := json.Unmarshal(raw, &resp); err != nil {
+			r := newResolver(g, client)
+			items, err := parseChannelMessages(raw, r, true)
+			if err != nil {
 				return err
 			}
-			r := newResolver(g, client)
-			items := make([]msgItem, len(resp.Messages))
-			for i, m := range resp.Messages {
-				items[i] = msgItem{
-					User:   messageDisplay(r, m),
-					Text:   m.Text,
-					TS:     m.TS,
-					Thread: m.ThreadTS,
-				}
-			}
-			return output.Emit(cmd.OutOrStdout(), g.Format, items)
+			return emitMessages(cmd.OutOrStdout(), g.Format, items)
 		},
 	}
 	cmd.Flags().StringVar(&channel, "channel", "", "channel ID or user ID for a DM")
@@ -152,22 +150,38 @@ func newMsgReadCommand(g *GlobalFlags) *cobra.Command {
 }
 
 func newMsgSendCommand(g *GlobalFlags) *cobra.Command {
-	var channel, text, textFile, threadTS string
+	var channel, text, textFile, threadTS, altText string
+	var files []string
 	var replyBroadcast bool
 	cmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send a message to a channel or DM",
+		Long: "Send text, local files, or both. Repeat --file to send multiple files together. " +
+			"With files, text becomes the upload's initial comment; --thread shares the files " +
+			"in that thread. Image-only sends are supported. --reply-broadcast is not supported with files.",
 		Annotations: map[string]string{
-			"slackMethod": "chat.postMessage",
+			"slackMethod": "chat.postMessage / files.getUploadURLExternal / files.completeUploadExternal",
 			"write":       "true",
-			"userScopes":  "chat:write",
-			"botScopes":   "chat:write",
+			"userScopes":  "chat:write,files:write,im:write",
+			"botScopes":   "chat:write,files:write,im:write",
 			"botCapable":  "true",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			content, err := readContent(text, textFile, "--text", "--text-file")
+			content, err := readMessageContent(text, textFile, files)
 			if err != nil {
 				return err
+			}
+			if len(files) > 0 {
+				if replyBroadcast {
+					return fmt.Errorf("--reply-broadcast is not supported with --file")
+				}
+				return sendFileMessage(cmd, g, fileUploadOptions{
+					Paths: files, Channel: channel, ThreadTS: threadTS,
+					Comment: content, AltText: altText,
+				}, "sent files")
+			}
+			if altText != "" {
+				return fmt.Errorf("--alt-text requires --file")
 			}
 			params := map[string]string{"channel": channel, "text": content}
 			if threadTS != "" {
@@ -203,6 +217,8 @@ func newMsgSendCommand(g *GlobalFlags) *cobra.Command {
 	cmd.Flags().StringVar(&channel, "channel", "", "channel ID or user ID")
 	cmd.Flags().StringVar(&text, "text", "", "message text")
 	cmd.Flags().StringVar(&textFile, "text-file", "", "path to text file (use - for stdin)")
+	cmd.Flags().StringArrayVar(&files, "file", nil, "local file to attach (repeat for multiple files)")
+	cmd.Flags().StringVar(&altText, "alt-text", "", "image description applied to attached files")
 	cmd.Flags().StringVar(&threadTS, "thread", "", "reply in this thread ts")
 	cmd.Flags().BoolVar(&replyBroadcast, "reply-broadcast", false, "also broadcast a threaded reply to the channel (requires --thread)")
 	cmd.MarkFlagRequired("channel")

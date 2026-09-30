@@ -192,6 +192,8 @@ slk msg read [flags]
 | `--limit` | — | `50` | max messages |
 | `--oldest` | — | — | start of time range (ts) |
 
+**Tips:** Read messages and their file/image references without downloading anything. Accessible image URLs can be viewed directly. For protected Slack files, use file download --file <ID> to save bytes in a private temporary directory and give the returned path to the agent's image viewer.
+
 ## slk msg schedule
 
 Schedule a message for a future time
@@ -234,7 +236,7 @@ slk msg scheduled [flags]
 
 Send a message to a channel or DM
 
-**Slack API:** `chat.postMessage`
+**Slack API:** `chat.postMessage / files.getUploadURLExternal / files.completeUploadExternal`
 
 ```bash
 slk msg send [flags]
@@ -242,11 +244,15 @@ slk msg send [flags]
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
+| `--alt-text` | — | — | image description applied to attached files |
 | `--channel` | ✓ | — | channel ID or user ID |
+| `--file` | — | `[]` | local file to attach (repeat for multiple files) |
 | `--reply-broadcast` | — | — | also broadcast a threaded reply to the channel (requires --thread) |
 | `--text` | — | — | message text |
 | `--text-file` | — | — | path to text file (use - for stdin) |
 | `--thread` | — | — | reply in this thread ts |
+
+**Tips:** Send text, local files, or both. Repeat --file to send multiple files together. With files, text becomes the upload's initial comment; --thread shares the files in that thread. Image-only sends are supported. --reply-broadcast is not supported with files.
 
 > [!CAUTION]
 > Write command — confirm with the user before executing; preview with `--dry-run`.

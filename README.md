@@ -37,6 +37,7 @@ exposes `--raw` when a caller wants full API responses.
 - [Usage](#usage)
   - [Checking for updates](#checking-for-updates)
   - [Multi-line content](#multi-line-content)
+  - [Images and attachments](#images-and-attachments)
   - [Drafts](#drafts)
   - [Slack Lists item shape](#slack-lists-item-shape)
   - [Escape hatch — `slk api`](#escape-hatch--slk-api)
@@ -498,8 +499,60 @@ cat weekly.md | slk canvas update --id F0123456789 --action prepend --markdown-f
 ```
 
 `--markdown-file` is available on `canvas create` / `canvas update`. `--text-file` is
-available on `msg send` / `msg draft` / `msg schedule` / `msg update` / `thread reply`. Use
+available on `msg send` / `msg draft` / `msg schedule` / `msg update` / `thread reply` /
+`file upload`. Use
 `-` as the path to read from stdin.
+
+### Images and attachments
+
+These features are maintained in this fork. Build this fork from source; upstream
+packages and releases do not necessarily include them.
+
+Message and thread reads retain file and image references, including image-only
+messages, Block Kit images, and legacy attachment images. Message search retains
+references when Slack includes them in its response. Reads do not download files or
+perform extra file lookups. JSON/JSONL output includes `files` and `images` only when
+present, with URLs, MIME types, dimensions, and alt text where available.
+
+The agent viewing workflow is **URL-first**:
+
+- View an accessible image URL directly with the agent's image-capable tool.
+- A reference marked `requires_auth: true` needs Slack authentication. Use
+  `file download` with the file ID (or its supported Slack-hosted image URL), then
+  give the returned local path to the image viewer. Do not put a Slack token in a
+  URL or pass it to the agent.
+- `external: true` denotes a provider-hosted file. `requires_auth: false` means no
+  Slack credentials should be attached; it does not guarantee the external
+  provider allows anonymous access. Provider authentication is outside this command.
+
+For example, after a read identifies a protected image:
+
+```bash
+slk file download --file F01234567
+# Prints an absolute local path suitable for the agent's image viewer.
+```
+
+Without `--output`, downloads use a new private temporary directory (0700) and a
+file readable only by the owner (0600). The default size limit is 25 MiB; adjust
+`--max-bytes` explicitly if needed. Existing output files are never overwritten.
+Successful files stay available until the caller removes them **after viewing**;
+failed downloads remove their partial files. JSON/JSONL output supplies the path
+and metadata; binary bytes and base64 are never printed. `--raw` is not supported
+for downloads. Files are not made public.
+
+Sending with `msg send --file` or `thread reply --file` uploads a local file into
+Slack. Repeat the flag for multiple files in one message; image-only messages are
+allowed. Text becomes the uploaded files' caption, rather than a separate chat
+message. The same caption and thread options are available on `file upload`.
+`--alt-text` supplies an image description to each uploaded file. With multiple
+files, titles default to their filenames; `file upload --title` is single-file only.
+File replies cannot use `--reply-broadcast`.
+
+Slack-hosted uploads use the supported external-upload workflow, not the retired
+`files.upload` method. Uploads require `files:write`; sending to a bare user ID also
+needs `im:write` to open the DM. Downloads require `files:read` and access to the
+file. Slack Connect placeholders may need a later file lookup; a missing URL or
+inaccessible file is reported explicitly.
 
 ### Drafts
 

@@ -57,6 +57,37 @@ The escape hatch `slk api <method> --params '<json>'` lets callers
 invoke any Slack Web method bypassing curation; nested object values
 must be pre-serialized as JSON strings (form-urlencoded transport).
 
+Image and attachment handling is URL-first. `msg read`, `thread read`, and
+message search preserve compact file metadata and image references supplied by
+Slack (`files[]`, Block Kit image blocks/elements, and legacy attachment images).
+Text-only concise/JSON/JSONL/table output is preserved. Reads are side-effect-free:
+they neither download bytes nor hydrate every file with an extra API call.
+`file info` exposes the file URL and authentication requirement without requiring
+`--raw`. Image dimensions and alt text are retained when available. External-file
+references are labeled separately; absence of a Slack authentication requirement
+does not imply anonymous access to the provider.
+
+Agents view accessible URLs directly. For credential-protected Slack images,
+they explicitly invoke `file download`, then open the returned local path with
+their image viewer. Downloads stream with a configurable size bound (25 MiB
+default), default to a private temporary directory (0700) and file (0600), never
+overwrite an existing output path, and remove partial files on failure.
+Successful temporary downloads persist until the caller cleans them up after
+viewing. Concise output is the absolute path; structured output adds file identity,
+MIME type, and byte count. Binary/raw output is deliberately unsupported.
+Authenticated fetches reject external-provider URLs, constrain Slack hosts and
+redirects, and never forward credentials to another origin or downgrade HTTPS.
+
+`file upload`, `msg send --file`, and `thread reply --file` share one production
+upload helper. Repeated file flags obtain one upload ticket per file, stream the
+bytes without a bearer header to the returned URL, and finalize the batch once
+with `files.completeUploadExternal`. Text is `initial_comment`, the thread is
+`thread_ts`, and image descriptions are `alt_txt` on upload tickets. Text is
+optional for file-bearing messages but remains required for text-only sends.
+Bare user destinations resolve through `conversations.open` before sharing.
+Multi-file uploads use filename titles; an explicit title is single-file only.
+File-bearing sends reject reply broadcasts rather than ignoring the flag.
+
 Canvas reading is special: there is no public Slack endpoint that
 returns canvas content as markdown. `canvas read` calls `files.info`,
 authenticates a GET against `url_private_download`, and converts the
@@ -120,6 +151,7 @@ External dependencies are intentionally narrow:
 │   ├── api/                    # HTTP client, error mapping, paginator
 │   │   ├── client.go           # api.Client; BaseURL overridable for tests
 │   │   ├── multipart.go        # CallMultipart: multipart/form-data file upload
+│   │   ├── download.go         # bounded authenticated file bytes and redirect policy
 │   │   ├── errors.go           # APIError + ExitCodeFor() mapping
 │   │   └── paginate.go         # CallAll: walks next_cursor up to N pages
 │   ├── auth/                   # credential management
@@ -155,7 +187,11 @@ External dependencies are intentionally narrow:
 │   │   │                       # channels / set-profile / set-photo / delete-photo /
 │   │   │                       # set-presence
 │   │   ├── search.go           # messages / channels / users / files / all
-│   │   ├── file.go             # files: list / info / upload / delete / public / revoke-public
+│   │   ├── file.go             # file command tree, list / info / upload / download / delete / public / revoke-public
+│   │   ├── fileupload.go       # shared ticket / byte transfer / batch completion
+│   │   ├── filedownload.go     # explicit protected-file downloads and local path output
+│   │   ├── filemessage.go      # message/thread upload dispatch and optional captions
+│   │   ├── media.go            # shared file/image parsing and URL-first output
 │   │   ├── pin.go              # pins: add / remove / list
 │   │   ├── bookmark.go         # bookmarks: add / edit / remove / list
 │   │   ├── team.go             # team: info / profile
@@ -273,9 +309,9 @@ Each package carries focused tests:
 
 | Package | Coverage focus |
 |---|---|
-| `internal/api` | error mapping, paginator cursor handling, retry on 429, multipart upload |
+| `internal/api` | error mapping, paginator cursor handling, retry on 429, multipart upload, bounded downloads and redirects |
 | `internal/auth` | TOML load/save, token-precedence matrix, OAuth callback |
-| `internal/commands` | dry-run output, flag registration, response-shape parsing helpers |
+| `internal/commands` | dry-run output, flag registration, response-shape parsing, production upload/download helpers, real PNG round-trip |
 | `internal/output` | each render branch + unknown-format error path |
 | `internal/quip` | per-element-family unit tests + full-fixture golden diff |
 | `internal/resolve` | cache hit, cross-instance disk persistence, graceful degradation |
