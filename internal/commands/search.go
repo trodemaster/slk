@@ -41,6 +41,9 @@ func newSearchMessagesCommand(g *GlobalFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "messages",
 		Short: "Search messages (requires a user token)",
+		Long: "Search messages, preserving file and image references when Slack includes them. " +
+			"View accessible URLs directly or use file download for protected Slack files. " +
+			"Search does not download images or fetch additional file metadata.",
 		Annotations: map[string]string{
 			"slackMethod": "search.messages",
 			"userScopes":  "search:read",
@@ -64,23 +67,11 @@ func newSearchMessagesCommand(g *GlobalFlags) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), string(raw))
 				return nil
 			}
-			var resp struct {
-				Messages struct {
-					Matches []struct {
-						Username string `json:"username"`
-						Text     string `json:"text"`
-						TS       string `json:"ts"`
-					} `json:"matches"`
-				} `json:"messages"`
-			}
-			if err := json.Unmarshal(raw, &resp); err != nil {
+			items, err := parseSearchMessages(raw)
+			if err != nil {
 				return err
 			}
-			items := make([]msgItem, len(resp.Messages.Matches))
-			for i, m := range resp.Messages.Matches {
-				items[i] = msgItem{User: m.Username, Text: m.Text, TS: m.TS}
-			}
-			return output.Emit(cmd.OutOrStdout(), g.Format, items)
+			return emitMessages(cmd.OutOrStdout(), g.Format, items)
 		},
 	}
 	cmd.Flags().StringVar(&query, "query", "", "search query")
@@ -283,7 +274,7 @@ func newSearchAllCommand(g *GlobalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return output.Emit(cmd.OutOrStdout(), g.Format, items)
+			return emitMediaHits(cmd.OutOrStdout(), g.Format, items)
 		},
 	}
 	cmd.Flags().StringVar(&query, "query", "", "search query")
@@ -292,33 +283,30 @@ func newSearchAllCommand(g *GlobalFlags) *cobra.Command {
 }
 
 // parseSearchAll combines message and file hits from a search.all response.
-// Messages → searchHit{Name:username, ID:ts, Extra:"message"}.
-// Files    → searchHit{Name:name, ID:id, Extra:filetype}.
-func parseSearchAll(raw []byte) ([]searchHit, error) {
+// File and image references are retained when present in Slack's response.
+func parseSearchAll(raw []byte) ([]mediaHit, error) {
 	var resp struct {
 		Messages struct {
-			Matches []struct {
-				Username string `json:"username"`
-				TS       string `json:"ts"`
-			} `json:"matches"`
+			Matches []slackMessage `json:"matches"`
 		} `json:"messages"`
 		Files struct {
-			Matches []struct {
-				ID       string `json:"id"`
-				Name     string `json:"name"`
-				Filetype string `json:"filetype"`
-			} `json:"matches"`
+			Matches []slackFile `json:"matches"`
 		} `json:"files"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
-	var items []searchHit
+	var items []mediaHit
 	for _, m := range resp.Messages.Matches {
-		items = append(items, searchHit{Name: m.Username, ID: m.TS, Extra: "message"})
+		files, images := messageMedia(m)
+		items = append(items, mediaHit{Name: m.Username, ID: m.TS, Extra: "message", Files: files, Images: images})
 	}
 	for _, f := range resp.Files.Matches {
-		items = append(items, searchHit{Name: f.Name, ID: f.ID, Extra: f.Filetype})
+		item := mediaHit{Name: f.Name, ID: f.ID, Extra: f.Filetype}
+		if f.URLPrivate != "" || f.URLPrivateDownload != "" || f.ExternalURL != "" || f.FileAccess != "" {
+			item.Files = []fileItem{f.item()}
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }

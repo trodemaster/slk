@@ -2,3 +2,6 @@
 /dist/
 *.test
 /tmp/
+.env
+.envrc
+.DS_Store

@@ -15,7 +15,7 @@ import (
 	"github.com/howar31/slk/internal/api"
 )
 
-// TestFileCommand_FlagsRegistered verifies that all six verbs and their flags
+// TestFileCommand_FlagsRegistered verifies that all verbs and their flags
 // are registered under the file command group.
 func TestFileCommand_FlagsRegistered(t *testing.T) {
 	cmd := newFileCommand(&GlobalFlags{})
@@ -26,7 +26,8 @@ func TestFileCommand_FlagsRegistered(t *testing.T) {
 	}{
 		{"list", []string{"channel", "user", "types"}},
 		{"info", []string{"file"}},
-		{"upload", []string{"file", "channel", "title"}},
+		{"upload", []string{"file", "channel", "title", "text", "text-file", "thread", "alt-text"}},
+		{"download", []string{"file"}},
 		{"delete", []string{"file"}},
 		{"public", []string{"file"}},
 		{"revoke-public", []string{"file"}},
@@ -40,6 +41,15 @@ func TestFileCommand_FlagsRegistered(t *testing.T) {
 				t.Errorf("missing --%s on file %s", flag, tc.verb)
 			}
 		}
+		upload, _, _ := cmd.Find([]string{"upload"})
+		if got := upload.Flags().Lookup("file").Value.Type(); got != "stringArray" {
+			t.Errorf("--file type: got %s, want stringArray", got)
+		}
+		for _, annotation := range []string{"userScopes", "botScopes"} {
+			if !strings.Contains(upload.Annotations[annotation], "im:write") {
+				t.Errorf("%s missing im:write", annotation)
+			}
+		}
 	}
 }
 
@@ -47,7 +57,7 @@ func TestFileCommand_FlagsRegistered(t *testing.T) {
 // line and make no HTTP calls.
 func TestFileWrite_DryRun(t *testing.T) {
 	// Create a temporary file for the upload dry-run test.
-	tmpFile, err := os.CreateTemp(t.TempDir(), "slk-test-*.txt")
+	tmpFile, err := os.CreateTemp(fileUploadTestDir(t), "slk-test-*.txt")
 	if err != nil {
 		t.Fatalf("create tmp file: %v", err)
 	}
@@ -60,7 +70,7 @@ func TestFileWrite_DryRun(t *testing.T) {
 	}{
 		{
 			args: []string{"upload", "--file", tmpFile.Name()},
-			want: "files.upload",
+			want: "files.getUploadURLExternal",
 		},
 		{
 			args: []string{"delete", "--file", "F01234567"},
@@ -211,8 +221,44 @@ func TestFileInfo_HTTPTest(t *testing.T) {
 	}
 }
 
+func TestFileInfo_DetailsCommand(t *testing.T) {
+	t.Setenv("SLK_TOKEN", "xoxp-test")
+	t.Setenv("SLK_CONFIG", filepath.Join(fileUploadTestDir(t), "missing.toml"))
+	t.Setenv("SLK_PROFILE", "")
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = uploadTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://slack.com/api/files.info" {
+			return nil, fmt.Errorf("unexpected request; network access disabled")
+		}
+		return &http.Response{
+			StatusCode: 200, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"ok":true,"file":{
+				"id":"F01234567","name":"diagram.png","mimetype":"image/png",
+				"url_private":"https://files.slack.com/files-pri/T01234567-F01234567/diagram.png",
+				"url_private_download":"https://files.slack.com/files-pri/T01234567-F01234567/download/diagram.png"
+			}}`)),
+		}, nil
+	})
+	cmd := newFileInfoCommand(&GlobalFlags{Format: "json"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--file", "F01234567"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
+		t.Fatalf("file info should emit a list: %v; output=%s", err, out.String())
+	}
+	if len(items) != 1 || !strings.Contains(out.String(), "files.slack.com") ||
+		items[0]["requires_auth"] != true || items[0]["url"] == "" {
+		t.Errorf("file info omitted URL details: %s", out.String())
+	}
+}
+
 // TestFileUpload_HTTPTest exercises the three-step upload flow:
-// (1) files.getUploadURLExternal, (2) raw PUT to the upload URL,
+// (1) files.getUploadURLExternal, (2) raw POST to the upload URL,
 // (3) files.completeUploadExternal.
 func TestFileUpload_HTTPTest(t *testing.T) {
 	// Track which endpoints were hit.
@@ -232,6 +278,12 @@ func TestFileUpload_HTTPTest(t *testing.T) {
 
 		case r.URL.Path == "/upload":
 			hitUpload = true
+			if r.ContentLength != int64(len("hello slk")) {
+				t.Errorf("Content-Length: got %d", r.ContentLength)
+			}
+			if r.Header.Get("Authorization") != "" {
+				t.Error("byte upload must not include bearer authentication")
+			}
 			body, _ := io.ReadAll(r.Body)
 			if string(body) != "hello slk" {
 				t.Errorf("upload body: got %q, want %q", string(body), "hello slk")
@@ -245,58 +297,26 @@ func TestFileUpload_HTTPTest(t *testing.T) {
 			if !strings.Contains(filesParam, "F01234567") {
 				t.Errorf("completeUploadExternal missing file_id in files param: %q", filesParam)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "files": []map[string]string{{"id": "F01234567"}}})
 		}
 	}))
 	defer srv.Close()
 
 	// Write a temporary file with known content.
-	dir := t.TempDir()
+	dir := fileUploadTestDir(t)
 	filePath := filepath.Join(dir, "hello.txt")
 	if err := os.WriteFile(filePath, []byte("hello slk"), 0600); err != nil {
 		t.Fatalf("write tmp file: %v", err)
 	}
 
-	// Run the upload command against the test server via the upload logic
-	// directly (using a fake client that points at srv).
 	c := api.New("xoxp-test")
 	c.BaseURL = srv.URL
-
-	// Step 1: get upload URL.
-	data, err := os.ReadFile(filePath)
+	raw, ids, err := uploadFiles(c, fileUploadOptions{Paths: []string{filePath}})
 	if err != nil {
-		t.Fatalf("read file: %v", err)
+		t.Fatalf("uploadFiles: %v", err)
 	}
-	raw, err := c.Call("files.getUploadURLExternal", map[string]string{
-		"filename": filepath.Base(filePath),
-		"length":   fmt.Sprint(len(data)),
-	}, nil)
-	if err != nil {
-		t.Fatalf("getUploadURLExternal: %v", err)
-	}
-	var urlResp struct {
-		UploadURL string `json:"upload_url"`
-		FileID    string `json:"file_id"`
-	}
-	if err := json.Unmarshal(raw, &urlResp); err != nil {
-		t.Fatalf("unmarshal url resp: %v", err)
-	}
-
-	// Step 2: raw POST to the upload URL.
-	uploadResp, err := http.Post(urlResp.UploadURL, "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("upload POST: %v", err)
-	}
-	uploadResp.Body.Close()
-	if uploadResp.StatusCode < 200 || uploadResp.StatusCode >= 300 {
-		t.Fatalf("upload status: %d", uploadResp.StatusCode)
-	}
-
-	// Step 3: complete the upload.
-	filesJSON := fmt.Sprintf(`[{"id":%q,"title":%q}]`, urlResp.FileID, filepath.Base(filePath))
-	_, err = c.Call("files.completeUploadExternal", map[string]string{"files": filesJSON}, nil)
-	if err != nil {
-		t.Fatalf("completeUploadExternal: %v", err)
+	if !strings.Contains(string(raw), `"files"`) {
+		t.Errorf("expected final completion response, got %s", raw)
 	}
 
 	if !hitGetURL {
@@ -308,7 +328,7 @@ func TestFileUpload_HTTPTest(t *testing.T) {
 	if !hitComplete {
 		t.Error("files.completeUploadExternal was not called")
 	}
-	if urlResp.FileID != "F01234567" {
-		t.Errorf("FileID: got %q, want F01234567", urlResp.FileID)
+	if len(ids) != 1 || ids[0] != "F01234567" {
+		t.Errorf("file IDs: got %v, want F01234567", ids)
 	}
 }
